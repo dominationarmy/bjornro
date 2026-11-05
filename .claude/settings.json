@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docs.api02.reimo-shops.de)",
+      "WebFetch(domain:dev.wix.com)",
+      "WebFetch(domain:api02.reimo-shops.de)",
+      "Bash(python3)",
+      "mcp__n8n-mcp__get_sdk_reference",
+      "mcp__n8n-mcp__search_nodes",
+      "mcp__n8n-mcp__get_node_types",
+      "mcp__n8n-mcp__create_workflow_from_code",
+      "mcp__n8n-mcp__list_credentials",
+      "WebFetch(domain:shopify.dev)",
+      "mcp__n8n-mcp__search_workflows",
+      "mcp__n8n-mcp__get_user_preferences",
+      "WebSearch"
+    ]
+  }
+}

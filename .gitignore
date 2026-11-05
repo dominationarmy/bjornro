@@ -1,0 +1,9 @@
+.venv/
+.agents/
+__pycache__/
+*.pyc
+.DS_Store
+data/
+output/
+tests/fixtures/
+.claude/settings.local.json

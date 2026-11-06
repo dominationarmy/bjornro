@@ -268,6 +268,7 @@ def analyze(wav_path: Path, clip_id: str) -> dict:
         })
 
     low_confidence_count = sum(1 for e in events if e["needs_review"])
+    average_confidence = round(sum(e["confidence"] for e in events) / len(events), 3) if events else 0.0
 
     return {
         "clip_id": clip_id,
@@ -278,6 +279,7 @@ def analyze(wav_path: Path, clip_id: str) -> dict:
         "recommended_word_count": len(events),
         "analysis": {
             "method": "hpss+pyin+onset_union_v1",
+            "average_confidence": average_confidence,
             "low_confidence_event_count": low_confidence_count,
             "params": {
                 "min_note_sec": MIN_NOTE_SEC,

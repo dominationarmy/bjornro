@@ -22,8 +22,6 @@ real validation.
 - `data/analysis/` — cached per-clip analysis JSON (gitignore-able, regenerable).
 - `data/audio/` — cached extracted mono WAV per clip.
 - `data/incoming/` — drop new source clips here.
-- `data/verified_quotes.example.json` — quote-library format example. Not the
-  real library — see architecture doc, Risk 3, before populating it further.
 
 ## Setup
 

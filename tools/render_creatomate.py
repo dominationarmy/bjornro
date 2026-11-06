@@ -55,12 +55,15 @@ AUTHOR_FADE_SEC = 1.2
 
 
 def build_renderscript(clip_id: str, video_url: str, quote: str, author: str,
-                        font_path: str, duration: float) -> dict:
-    analysis_path = ANALYSIS_CACHE_DIR / f"{clip_id}.json"
-    if not analysis_path.exists():
-        raise FileNotFoundError(f"No cached analysis for {clip_id} at {analysis_path}; run analyze_shakuhachi.py first.")
-    analysis = json.loads(analysis_path.read_text())
-    events = analysis["events"]
+                        font_path: str, duration: float, events: list | None = None) -> dict:
+    """events, when given, is the `events` array from a prior analyze_shakuhachi
+    result -- pass it explicitly rather than relying on the local cache file,
+    since a deployed service's filesystem may not have it (see service.py)."""
+    if events is None:
+        analysis_path = ANALYSIS_CACHE_DIR / f"{clip_id}.json"
+        if not analysis_path.exists():
+            raise FileNotFoundError(f"No cached analysis for {clip_id} at {analysis_path}; run analyze_shakuhachi.py first, or pass events explicitly.")
+        events = json.loads(analysis_path.read_text())["events"]
 
     words = quote.split()
     mapping = map_words_to_events(words, events)

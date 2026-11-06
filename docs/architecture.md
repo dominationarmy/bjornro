@@ -167,7 +167,7 @@ rendering cost, visual artifacts at word boundaries), the documented
 fallback is a custom Python renderer (Pillow + ffmpeg) with full manual
 control.
 
-### Risk 3 — Quote licensing (resolved for v1, confirmed by checking the actual policy)
+### Risk 3 — Quote licensing (resolved by changing approach, not by curating a library)
 Checked the Love Serve Remember Foundation's own copyright policy
 (ramdass.org/copyright — site blocks direct fetch, confirmed via two
 independent search summaries of its text): it explicitly states protected
@@ -179,16 +179,25 @@ or video content. Neem Karoli Baba himself left no written works — every
 carries its own compilation copyright; there is no primary-source public
 domain material to fall back on there.
 
-Your instruction was "only use ram dass and maharaji quotes that are legal
-and public to use... keep it ethical always." Given LSRF's policy as found,
-that means: **no Ram Dass or Neem Karoli Baba quote ships in the library
-without written permission from LSRF**, obtained by you (I can't request or
-grant that on your behalf). `data/verified_quotes.example.json` ships with
-only verifiably public-domain spiritual literature (public-domain
-translations of the Tao Te Ching, Dhammapada — translator deceased 70+
-years / pre-1923) and clearly-labeled original reflections. If you get
-written permission from LSRF, tell me and I'll add their material with the
-exact source/permission reference recorded per quote.
+A first attempt at this (v1) tried building a small static library of
+verified public-domain quotes (Tao Te Ching, Dhammapada) as JSON. That
+approach was abandoned mid-build after a fact-check turned up a real
+problem: a quote already in that draft file ("Nature does not hurry, yet
+everything is accomplished"), attributed to "tr. James Legge (1891)," turned
+out on verification to be a popular paraphrase that does NOT match Legge's
+actual wording — a misattribution I'd made without checking, exactly the
+mistake the spec explicitly warns against. Rather than do the much larger
+work of verifying a whole library line-by-line against primary texts, the
+project pivoted to a different design (your call): **quote proposals are
+generated fresh each week by an OpenAI node in n8n**, as original
+reflections only — never attributed to Ram Dass, Neem Karoli Baba, Lao Tzu,
+or any other real historical figure, since an LLM recalling a "real" quote
+from memory is exactly how fabricated attributions happen. Generated
+reflections are labeled `Quote Type = Original Reflection`, `Author = Björn
+Rō`, checked against existing Airtable proposals to avoid repeats. If you
+later get written permission from LSRF for Ram Dass/Neem Karoli Baba
+material, that would need to be added as a separate, actually-verified
+source — not generated.
 
 ### Risk 4 — No system ffmpeg/Homebrew on this machine
 Resolved for the Python side: `imageio-ffmpeg` (pip-installed into the
@@ -297,8 +306,6 @@ exact string match.
 - `tests/make_synthetic_shakuhachi.py` — synthetic smoke-test fixture
   generator, used before the real clip was available.
 - `data/analysis/BR-TEST-001.json` — real analysis output from your test clip.
-- `data/verified_quotes.example.json` — quote-library format, populated only
-  with verifiably public-domain entries + original reflections (see Risk 3).
 - ffmpeg available in-venv via `imageio-ffmpeg` (no system install needed).
 - No n8n workflows exist yet (blocked on open question 5 — can't wire a
   workflow to a service with no reachable URL). No Airtable base exists yet
@@ -328,9 +335,11 @@ exact string match.
    it up), set the header template to
    `{"headers":{"Authorization":"Bearer {{api_key}}"}}`, and fill in your
    real key once you have one. The workflow will not run until both are done.
-3. ~~Quote sourcing~~ — resolved per Risk 3: public domain + original
-   reflections for v1; Ram Dass/Neem Karoli Baba material only after you
-   get written permission from LSRF.
+3. ~~Quote sourcing~~ — resolved per Risk 3: AI-generated original
+   reflections each week (never attributed to real historical figures),
+   deduped against Airtable; Ram Dass/Neem Karoli Baba material only after
+   you get written permission from LSRF, and only as actually-verified
+   text, not generated.
 4. ~~Airtable workspace~~ — you said a new base under the same account. Not
    yet created — see open question 6.
 5. ~~Where should `tools/service.py` run?~~ — deployed to Railway:

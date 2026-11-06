@@ -4,7 +4,11 @@ Björn Rō — cuts a segment out of a source video with ffmpeg.
 
 Tries stream-copy first (fast, no quality loss). Falls back to re-encoding
 only if the copy fails, which can happen when the requested start time
-doesn't land cleanly on a keyframe for this container/codec.
+doesn't land cleanly on a video keyframe for this container/codec -- audio
+doesn't have that constraint (AAC/MP3 frames are a few tens of ms, so a cut
+point is always "close enough"), so the fallback still copies audio
+untouched and only re-encodes video, at a high enough quality (CRF 17) to
+be visually indistinguishable from the source.
 """
 from __future__ import annotations
 
@@ -29,8 +33,9 @@ def cut_clip(source_path: Path, start: float, end: float, out_path: Path) -> Non
 
     reencode_cmd = [
         ffmpeg_exe, "-y", "-ss", str(start), "-i", str(source_path),
-        "-t", str(duration), "-c:v", "libx264", "-c:a", "aac",
-        "-avoid_negative_ts", "make_zero", str(out_path),
+        "-t", str(duration), "-c:v", "libx264", "-crf", "17", "-preset", "medium",
+        "-c:a", "copy", "-avoid_negative_ts", "make_zero",
+        str(out_path),
     ]
     result = subprocess.run(reencode_cmd, capture_output=True, text=True)
     if result.returncode != 0:

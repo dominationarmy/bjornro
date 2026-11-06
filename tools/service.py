@@ -33,30 +33,36 @@ Endpoints:
                          Creatomate RenderScript JSON. Pass `events` (the `events`
                          array from a prior /analyze response) explicitly -- do not
                          rely on server-side caching across requests.
-  POST /select-and-cut?recording_id=...&drive_folder_id=...&target_count=21
-                         &min_duration=30&max_duration=60  (raw source video bytes
-                         as the body) -> analyzes the full recording, picks up to
-                         target_count non-overlapping "clean cut" segments (bounded
-                         by detected pauses, never mid-note), cuts each with ffmpeg,
-                         and uploads each directly to the given Drive folder via a
-                         service account (GOOGLE_SERVICE_ACCOUNT_JSON env var) --
-                         never routes the cut clips back through n8n. Returns a
-                         summary JSON, not the video bytes themselves.
+  POST /select-and-cut?recording_id=...&target_count=21&min_duration=30
+                         &max_duration=60  (raw source video bytes as the
+                         body) -> analyzes the full recording, picks up to
+                         target_count non-overlapping "clean cut" segments
+                         (bounded by detected pauses, never mid-note), cuts
+                         each with ffmpeg, and returns them all as a single
+                         zip file (one .mp4 per clip, plus manifest.json with
+                         start/end/duration/score per clip). Google Drive
+                         service accounts have no storage quota of their own
+                         on a regular (non-Workspace) Drive, so this service
+                         cannot upload there directly -- the caller (n8n) is
+                         responsible for unzipping the response and uploading
+                         each clip via its own, already-authenticated Google
+                         Drive credential.
 """
 from __future__ import annotations
 
-import base64
 import json
-import os
 import shutil
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Optional
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import analyze_shakuhachi  # noqa: E402
@@ -64,7 +70,6 @@ import render_creatomate  # noqa: E402
 from text_layout import resolve_default_font  # noqa: E402
 from select_clean_segments import select_clean_segments  # noqa: E402
 from cut_clips import cut_clip  # noqa: E402
-from drive_upload import upload_file as drive_upload_file  # noqa: E402
 
 app = FastAPI(title="Björn Rō audio/render service")
 
@@ -132,7 +137,6 @@ async def analyze_upload(clip_id: str, request: Request, force: bool = False):
 @app.post("/select-and-cut")
 async def select_and_cut(
     recording_id: str,
-    drive_folder_id: str,
     request: Request,
     target_count: int = 21,
     min_duration: float = 30.0,
@@ -161,31 +165,45 @@ async def select_and_cut(
             out_path = Path(tempfile.mkstemp(suffix=".mp4")[1])
             cut_paths.append(out_path)
             cut_clip(source_path, seg["start"], seg["end"], out_path)
-            drive_result = drive_upload_file(out_path, filename, drive_folder_id)
-            clips.append({
-                "filename": filename,
-                "start": seg["start"],
-                "end": seg["end"],
-                "duration": seg["duration"],
-                "score": seg["score"],
-                "drive_file_id": drive_result.get("id"),
-                "drive_url": drive_result.get("webViewLink"),
-            })
+            clips.append({"filename": filename, "path": out_path, **seg})
 
-        return {
-            "recording_id": recording_id,
-            "source_duration": analysis["duration"],
-            "segments_found": len(segments),
-            "clips": clips,
-        }
+        zip_path = Path(tempfile.mkstemp(suffix=".zip")[1])
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
+            for c in clips:
+                zf.write(c["path"], arcname=c["filename"])
+            manifest = {
+                "recording_id": recording_id,
+                "source_duration": analysis["duration"],
+                "segments_found": len(segments),
+                "clips": [
+                    {"filename": c["filename"], "start": c["start"], "end": c["end"],
+                     "duration": c["duration"], "score": c["score"]}
+                    for c in clips
+                ],
+            }
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+
+        def _cleanup():
+            for p in cut_paths:
+                p.unlink(missing_ok=True)
+            zip_path.unlink(missing_ok=True)
+
+        return FileResponse(
+            zip_path,
+            media_type="application/zip",
+            filename=f"{recording_id}-clips.zip",
+            background=BackgroundTask(_cleanup),
+        )
     except HTTPException:
+        for p in cut_paths:
+            p.unlink(missing_ok=True)
         raise
     except Exception as exc:
+        for p in cut_paths:
+            p.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
         source_path.unlink(missing_ok=True)
-        for p in cut_paths:
-            p.unlink(missing_ok=True)
 
 
 @app.post("/render-script")
@@ -200,37 +218,3 @@ def render_script(req: RenderScriptRequest):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/debug-service-account")
-def debug_service_account():
-    """Temporary diagnostic for GOOGLE_SERVICE_ACCOUNT_JSON setup issues.
-    Never returns the private key itself -- only non-secret metadata
-    (client_email and private_key_id are not secrets; they're visible in
-    the GCP console and in the key's own public x509 cert URL)."""
-    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    result = {"env_var_set": bool(raw), "raw_length": len(raw) if raw else 0}
-    if not raw:
-        return result
-    try:
-        decoded = base64.b64decode(raw)
-        result["base64_decode_ok"] = True
-        result["decoded_length"] = len(decoded)
-    except Exception as exc:
-        result["base64_decode_ok"] = False
-        result["base64_error"] = str(exc)
-        return result
-    try:
-        info = json.loads(decoded)
-        result["json_parse_ok"] = True
-        result["client_email"] = info.get("client_email")
-        result["private_key_id"] = info.get("private_key_id")
-        private_key = info.get("private_key", "")
-        result["private_key_length"] = len(private_key)
-        result["private_key_newline_count"] = private_key.count("\n")
-        result["private_key_starts_with"] = private_key[:30]
-        result["private_key_ends_with"] = private_key[-30:]
-    except Exception as exc:
-        result["json_parse_ok"] = False
-        result["json_error"] = str(exc)
-    return result

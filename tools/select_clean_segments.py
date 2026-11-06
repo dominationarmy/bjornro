@@ -3,9 +3,11 @@
 Björn Rō — selects the best ~N "clean start, clean end" segments from a long
 recording's note/pause timeline, for the 1-hour-to-N-shorts workflow.
 
-A cut is "clean" when it falls at the midpoint of a detected pause (real
-silence between musical phrases, from analyze_shakuhachi.py) -- never
-mid-note. This module is pure timeline math: it takes the `events` and
+A cut is "clean" when a segment starts exactly where a note's onset begins
+and ends exactly where the previous note's audible content stopped (both
+boundaries come straight from analyze_shakuhachi.py's pause detection) --
+never mid-note, and never carrying an unrelated note's decay/fade across
+the cut. This module is pure timeline math: it takes the `events` and
 `pauses` arrays from an analyze_shakuhachi.py result and returns candidate
 segment boundaries. It does not touch audio or video files.
 
@@ -17,11 +19,20 @@ validated against what actually sounds good.
 from __future__ import annotations
 
 
-def _cut_points(duration: float, pauses: list[dict]) -> list[float]:
-    points = [0.0]
-    for p in pauses:
-        points.append((p["start"] + p["end"]) / 2.0)
-    points.append(duration)
+def _candidate_starts(pauses: list[dict]) -> list[float]:
+    """Points usable as a segment's start: 0.0, or the end of a pause (i.e.
+    exactly where the next note's onset begins -- starting here means zero
+    bleed from the previous, unrelated note's decay/fade)."""
+    points = [0.0] + [p["end"] for p in pauses]
+    return sorted(set(points))
+
+
+def _candidate_ends(duration: float, pauses: list[dict]) -> list[float]:
+    """Points usable as a segment's end: the full duration, or the start of
+    a pause (i.e. exactly where the previous note's audible content stopped
+    -- ending here means no dead silence tacked on, and no bleed into the
+    next, unrelated note)."""
+    points = [duration] + [p["start"] for p in pauses]
     return sorted(set(points))
 
 
@@ -41,18 +52,19 @@ def select_clean_segments(events: list[dict], pauses: list[dict], duration: floa
     """Returns up to target_count non-overlapping {start, end, duration,
     score} segments, each bounded by clean cut points, within
     [min_duration, max_duration], ranked by quality then ordered by time."""
-    cuts = _cut_points(duration, pauses)
+    starts = _candidate_starts(pauses)
+    ends = _candidate_ends(duration, pauses)
 
     candidates = []
-    for i in range(len(cuts)):
-        start = cuts[i]
-        for j in range(i + 1, len(cuts)):
-            end = cuts[j]
+    for start in starts:
+        for end in ends:
+            if end <= start:
+                continue
             span = end - start
             if span < min_duration:
                 continue
             if span > max_duration:
-                break  # cuts is sorted ascending, so further j only grows the span
+                break  # ends is sorted ascending, so further end only grows the span
             events_in_range = [e for e in events if e["start"] >= start and e["end"] <= end]
             candidates.append({
                 "start": round(start, 3),

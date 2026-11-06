@@ -1,11 +1,14 @@
 # Björn Rō — Architecture
 
-Status: **Phase 1 proof-of-concept, partial.** The note-detection engine has
-been run against a real shakuhachi recording (see Risk 1) and tuned once
-against real findings, not just synthetic tones. Nothing in this document
-describing Creatomate, Airtable, or rendering behavior should be read as
-"working" until marked tested — in particular, no Creatomate render has been
-attempted (no account yet) and no n8n workflow has been built yet (see Risk 6).
+Status: **Phase 1 proof-of-concept, mostly wired up.** The note-detection
+engine has been run against a real shakuhachi recording (see Risk 1) and
+tuned once against real findings, not just synthetic tones. The Python
+service is deployed and confirmed reachable on Railway. The Airtable base
+and all three tables exist with full field schema. The n8n render workflow
+exists with the real service URL wired in. **Still unproven:** an actual
+Creatomate render (no account/key yet) and a real `/analyze` call against a
+publicly-reachable video (the only test so far used a local file path,
+which only works when run locally, not from the deployed service).
 
 ## 1. Component boundaries
 
@@ -58,11 +61,31 @@ app wrapping the same functions the CLI scripts use:
 - `POST /analyze` — `{clip_id, video_url}` → note-event analysis JSON
 - `POST /render-script` — `{clip_id, video_url, quote, author, duration}` → Creatomate RenderScript JSON
 
-This has been import-checked and round-tripped once over real local HTTP
-(`/render-script` against the real clip's cached analysis, 200 OK, correct
-element count). **It has not been deployed anywhere n8n Cloud can reach it**
-— that's open question 5 below, and nothing in the n8n workflow layer can be
-built against it until it's hosted somewhere with a public URL.
+**Deployed and confirmed working**: https://bjornro-production.up.railway.app
+(Railway, repo https://github.com/dominationarmy/bjornro, `main` branch
+auto-deploys). `/docs` returns 200, confirming the full dependency chain
+(librosa/numpy/scipy/Pillow/etc.) imports cleanly in that container — not a
+given, given how heavy this stack is. The first deploy attempt actually
+failed: Railway's default Python (3.13) has no prebuilt `numpy==2.0.2` wheel
+and failed trying to compile it from source; fixed with a `.python-version`
+file pinning 3.11. A second real bug then surfaced on the first live
+request: `text_layout.py`'s font fallback only checked macOS system font
+paths (Georgia/Times), which don't exist on Linux — every `/render-script`
+call 404'd. Fixed by bundling `tools/fonts/EBGaramond-Regular.ttf` (SIL Open
+Font License, matches the brand's "refined, cinematic serif" requirement,
+and is also available to Creatomate as a Google Font by name, so the same
+typeface is used for both the Python layout measurements and the actual
+Creatomate render). Re-tested after both fixes: the service now correctly
+reaches the "no cached analysis for this clip_id" error for an unknown
+clip — the right failure, proving the whole chain up to that point works.
+**Not yet tested**: a real `/analyze` call (needs a publicly-reachable video
+URL) or a real `/render-script` success (needs cached analysis data, which
+only exists for clips that have gone through `/analyze` — the server has no
+access to this Mac's local `data/` cache, by design, since `data/` is
+gitignored and Railway only has what's in the repo).
+
+The n8n workflow's "Build RenderScript" node now points at the real URL
+above instead of a placeholder.
 
 ## 2. Technical risks (ranked by how much they could force an architecture change)
 
@@ -179,16 +202,17 @@ Needs a stable idempotency key. Recommend the Google Drive file ID (not
 filename — filenames get renamed/re-uploaded) as the dedup key checked
 against Airtable before creating a new Clip record.
 
-### Risk 6 — n8n Cloud has no filesystem/shell access (found while building, now resolved)
+### Risk 6 — n8n Cloud has no filesystem/shell access (resolved)
 This n8n instance is n8n Cloud. Node search for "execute command" /
 "executeCommand" found nothing — only SSH (needs its own reachable server)
 and the sandboxed Code node (no network access, can't import librosa/numpy).
 So n8n cannot shell out to the Python scripts directly, which is what an
 earlier draft of this document assumed. Resolved by wrapping the Python
-logic as an HTTP service (`tools/service.py`, FastAPI) that n8n calls with a
-normal HTTP Request node instead. That service is written and
-import/HTTP-round-trip tested locally, but **it isn't deployed anywhere n8n
-Cloud can reach it yet** — see open question 5.
+logic as an HTTP service (`tools/service.py`, FastAPI) deployed to Railway
+at https://bjornro-production.up.railway.app, which n8n's HTTP Request node
+calls directly. Live and responding correctly (see Section 1 above for the
+two real deploy bugs found and fixed along the way: a Python-version
+mismatch, and a macOS-only font fallback).
 
 ## 3. Airtable schema
 
@@ -309,21 +333,24 @@ exact string match.
    get written permission from LSRF.
 4. ~~Airtable workspace~~ — you said a new base under the same account. Not
    yet created — see open question 6.
-5. **Where should `tools/service.py` run?** This is new and blocks the next
-   concrete step. n8n Cloud needs a public URL to reach it. Options, roughly
-   cheapest/simplest to most involved: (a) a tunnel from this Mac (e.g.
-   Cloudflare Tunnel or ngrok) if this machine can stay on/reachable; (b) a
-   small always-on VPS (~$5–6/mo, e.g. a 1GB droplet/Lightsail instance);
-   (c) a serverless container platform (Fly.io, Render.com) with a
-   pay-per-use or small flat tier. Whichever you pick determines the actual
-   next build step, since the n8n workflow's HTTP Request node needs a real
-   URL to call.
-6. **Airtable base creation.** I have no way to create a brand-new Airtable
-   base purely by API — Airtable's API can add tables/fields to an existing
-   base, but has no endpoint to create a base from nothing without a
-   `workspaceId`, which isn't retrievable through the API either. Fastest
-   path: you create an empty base named "Björn Rō" by hand under the same
-   Airtable account as the "ZerasMain" credential (a few seconds in the
-   Airtable UI) and send me its ID (from the URL, `app...`) — I'll then add
-   all three tables and every field from the schema above via the API
-   automatically.
+5. ~~Where should `tools/service.py` run?~~ — deployed to Railway:
+   https://bjornro-production.up.railway.app (repo:
+   https://github.com/dominationarmy/bjornro, auto-deploys from `main`).
+   Confirmed working after fixing two real deploy bugs (Python version,
+   font fallback — see Section 1). Wired into the n8n workflow's "Build
+   RenderScript" node.
+6. ~~Airtable base creation~~ — done. Base `appUc8UDDzYrXebsV`
+   (https://airtable.com/appUc8UDDzYrXebsV), all three tables created with
+   full field schema via Airtable's Meta API:
+   - Clips: `tblE2gbbBY6XWjv9D`
+   - Quote Proposals: `tblURfOUwaFmRS6rr` (linked to Clips)
+   - Rendered Reels: `tblCqXgj8sTh5KIrT` (linked to both)
+
+   The "ZerasMain" n8n credential turned out to lack `schema.bases:write`
+   permission and wasn't scoped to this base, so a dedicated Airtable token
+   (scopes: `data.records:read/write`, `schema.bases:read/write`, access
+   limited to this one base) was created instead and used directly via the
+   API for this one-time schema setup — it was not yet added as an n8n
+   credential. **Still needed:** add that token as a new n8n credential
+   (Settings → Credentials → New → Airtable Personal Access Token) before
+   Phase 2's quote-proposal workflows can read/write records in this base.

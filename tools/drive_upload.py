@@ -54,5 +54,6 @@ def upload_file(local_path: Path, filename: str, folder_id: str) -> dict:
             },
             timeout=300,
         )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(f"Drive upload failed ({resp.status_code}): {resp.text}")
     return resp.json()

@@ -24,6 +24,7 @@ from pathlib import Path
 from PIL import ImageFont
 
 DEFAULT_FONT_CANDIDATES = [
+    str(Path(__file__).resolve().parent / "fonts" / "EBGaramond-Regular.ttf"),
     "/System/Library/Fonts/Supplemental/Georgia.ttf",
     "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
 ]
@@ -34,9 +35,9 @@ def resolve_default_font() -> str:
         if Path(p).exists():
             return p
     raise FileNotFoundError(
-        "No fallback serif font found on this machine; pass --font-path "
-        "pointing at the Google Font TTF configured in the Creatomate "
-        "template (e.g. EB Garamond) so measurements match the real render."
+        "No fallback serif font found; pass --font-path pointing at the "
+        "Google Font TTF configured in the Creatomate template (e.g. EB "
+        "Garamond) so measurements match the real render."
     )
 
 

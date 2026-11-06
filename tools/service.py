@@ -45,7 +45,9 @@ Endpoints:
 """
 from __future__ import annotations
 
+import base64
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -198,3 +200,37 @@ def render_script(req: RenderScriptRequest):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/debug-service-account")
+def debug_service_account():
+    """Temporary diagnostic for GOOGLE_SERVICE_ACCOUNT_JSON setup issues.
+    Never returns the private key itself -- only non-secret metadata
+    (client_email and private_key_id are not secrets; they're visible in
+    the GCP console and in the key's own public x509 cert URL)."""
+    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    result = {"env_var_set": bool(raw), "raw_length": len(raw) if raw else 0}
+    if not raw:
+        return result
+    try:
+        decoded = base64.b64decode(raw)
+        result["base64_decode_ok"] = True
+        result["decoded_length"] = len(decoded)
+    except Exception as exc:
+        result["base64_decode_ok"] = False
+        result["base64_error"] = str(exc)
+        return result
+    try:
+        info = json.loads(decoded)
+        result["json_parse_ok"] = True
+        result["client_email"] = info.get("client_email")
+        result["private_key_id"] = info.get("private_key_id")
+        private_key = info.get("private_key", "")
+        result["private_key_length"] = len(private_key)
+        result["private_key_newline_count"] = private_key.count("\n")
+        result["private_key_starts_with"] = private_key[:30]
+        result["private_key_ends_with"] = private_key[-30:]
+    except Exception as exc:
+        result["json_parse_ok"] = False
+        result["json_error"] = str(exc)
+    return result

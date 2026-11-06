@@ -7,3 +7,4 @@ data/
 output/
 tests/fixtures/
 .claude/settings.local.json
+.claude/scheduled_tasks.lock

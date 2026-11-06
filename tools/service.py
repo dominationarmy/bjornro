@@ -33,6 +33,15 @@ Endpoints:
                          Creatomate RenderScript JSON. Pass `events` (the `events`
                          array from a prior /analyze response) explicitly -- do not
                          rely on server-side caching across requests.
+  POST /select-and-cut?recording_id=...&drive_folder_id=...&target_count=21
+                         &min_duration=30&max_duration=60  (raw source video bytes
+                         as the body) -> analyzes the full recording, picks up to
+                         target_count non-overlapping "clean cut" segments (bounded
+                         by detected pauses, never mid-note), cuts each with ffmpeg,
+                         and uploads each directly to the given Drive folder via a
+                         service account (GOOGLE_SERVICE_ACCOUNT_JSON env var) --
+                         never routes the cut clips back through n8n. Returns a
+                         summary JSON, not the video bytes themselves.
 """
 from __future__ import annotations
 
@@ -51,6 +60,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import analyze_shakuhachi  # noqa: E402
 import render_creatomate  # noqa: E402
 from text_layout import resolve_default_font  # noqa: E402
+from select_clean_segments import select_clean_segments  # noqa: E402
+from cut_clips import cut_clip  # noqa: E402
+from drive_upload import upload_file as drive_upload_file  # noqa: E402
 
 app = FastAPI(title="Björn Rō audio/render service")
 
@@ -113,6 +125,65 @@ async def analyze_upload(clip_id: str, request: Request, force: bool = False):
     tmp_path = Path(tempfile.mkstemp(suffix=".mp4")[1])
     tmp_path.write_bytes(body)
     return _run_analysis(tmp_path, clip_id, force)
+
+
+@app.post("/select-and-cut")
+async def select_and_cut(
+    recording_id: str,
+    drive_folder_id: str,
+    request: Request,
+    target_count: int = 21,
+    min_duration: float = 30.0,
+    max_duration: float = 60.0,
+):
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty request body -- expected raw video bytes")
+
+    source_path = Path(tempfile.mkstemp(suffix=".mp4")[1])
+    source_path.write_bytes(body)
+
+    cut_paths: list[Path] = []
+    try:
+        wav_path = analyze_shakuhachi.extract_audio(source_path, recording_id, force=True)
+        analysis = analyze_shakuhachi.analyze(wav_path, recording_id)
+
+        segments = select_clean_segments(
+            analysis["events"], analysis["pauses"], analysis["duration"],
+            target_count=target_count, min_duration=min_duration, max_duration=max_duration,
+        )
+
+        clips = []
+        for i, seg in enumerate(segments, start=1):
+            filename = f"{recording_id}-{i:02d}.mp4"
+            out_path = Path(tempfile.mkstemp(suffix=".mp4")[1])
+            cut_paths.append(out_path)
+            cut_clip(source_path, seg["start"], seg["end"], out_path)
+            drive_result = drive_upload_file(out_path, filename, drive_folder_id)
+            clips.append({
+                "filename": filename,
+                "start": seg["start"],
+                "end": seg["end"],
+                "duration": seg["duration"],
+                "score": seg["score"],
+                "drive_file_id": drive_result.get("id"),
+                "drive_url": drive_result.get("webViewLink"),
+            })
+
+        return {
+            "recording_id": recording_id,
+            "source_duration": analysis["duration"],
+            "segments_found": len(segments),
+            "clips": clips,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        source_path.unlink(missing_ok=True)
+        for p in cut_paths:
+            p.unlink(missing_ok=True)
 
 
 @app.post("/render-script")

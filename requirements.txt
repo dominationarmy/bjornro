@@ -9,3 +9,4 @@ soundfile==0.13.1
 scikit-learn==1.6.1
 imageio-ffmpeg==0.6.0
 Pillow==11.3.0
+google-auth==2.50.0

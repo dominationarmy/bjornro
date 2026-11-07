@@ -35,10 +35,12 @@ Endpoints:
                          rely on server-side caching across requests.
   POST /select-and-cut?recording_id=...&target_count=21&min_duration=30
                          &max_duration=60  (raw source video bytes as the
-                         body) -> analyzes the full recording, picks up to
-                         target_count non-overlapping "clean cut" segments
-                         (bounded by detected pauses, never mid-note), cuts
-                         each with ffmpeg, and returns them all as a single
+                         body) -> picks up to target_count non-overlapping
+                         clips that start on a phrase's first attack after a
+                         real breath pause and end after the last note has
+                         faded out (clean_points.py), cuts each one
+                         frame-accurately, checks it landed on target, and
+                         returns them all as a single
                          zip file (one .mp4 per clip, plus manifest.json with
                          start/end/duration/score per clip). Google Drive
                          service accounts have no storage quota of their own
@@ -59,6 +61,7 @@ from pathlib import Path
 from typing import Optional
 
 import requests
+import soundfile as sf
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -68,8 +71,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import analyze_shakuhachi  # noqa: E402
 import render_creatomate  # noqa: E402
 from text_layout import resolve_default_font  # noqa: E402
+from clean_points import find_clean_points  # noqa: E402
 from select_clean_segments import select_clean_segments  # noqa: E402
-from cut_clips import cut_clip  # noqa: E402
+from cut_clips import cut_clip, video_encoder_args, verify_cut  # noqa: E402
 
 app = FastAPI(title="Björn Rō audio/render service")
 
@@ -149,38 +153,38 @@ async def select_and_cut(
     source_path = Path(tempfile.mkstemp(suffix=".mp4")[1])
     source_path.write_bytes(body)
 
+    wav_path = None
     cut_paths: list[Path] = []
     try:
         wav_path = analyze_shakuhachi.extract_audio(source_path, recording_id, force=True)
-        analysis = analyze_shakuhachi.analyze(wav_path, recording_id)
-
+        audio, sr = sf.read(str(wav_path), dtype="float32")
+        points = find_clean_points(audio, sr)
         segments = select_clean_segments(
-            analysis["events"], analysis["pauses"], analysis["duration"],
-            target_count=target_count, min_duration=min_duration, max_duration=max_duration,
+            points, target_count=target_count, min_duration=min_duration, max_duration=max_duration,
         )
+        encoder_args = video_encoder_args(source_path)
 
         clips = []
         for i, seg in enumerate(segments, start=1):
             filename = f"{recording_id}-{i:02d}.mp4"
             out_path = Path(tempfile.mkstemp(suffix=".mp4")[1])
             cut_paths.append(out_path)
-            cut_clip(source_path, seg["start"], seg["end"], out_path)
+            cut_clip(source_path, seg["start"], seg["end"], out_path, encoder_args, seg["fade_out"])
+            verify_cut(audio, sr, out_path, seg["start"], seg["end"])
             clips.append({"filename": filename, "path": out_path, **seg})
 
+        summary = {
+            "recording_id": recording_id,
+            "source_duration": round(len(audio) / sr, 3),
+            "clean_starts_found": len(points["starts"]),
+            "clean_ends_found": len(points["ends"]),
+            "segments_found": len(segments),
+        }
         zip_path = Path(tempfile.mkstemp(suffix=".zip")[1])
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
             for c in clips:
                 zf.write(c["path"], arcname=c["filename"])
-            manifest = {
-                "recording_id": recording_id,
-                "source_duration": analysis["duration"],
-                "segments_found": len(segments),
-                "clips": [
-                    {"filename": c["filename"], "start": c["start"], "end": c["end"],
-                     "duration": c["duration"], "score": c["score"]}
-                    for c in clips
-                ],
-            }
+            manifest = {**summary, "clips": [{k: v for k, v in c.items() if k != "path"} for c in clips]}
             zf.writestr("manifest.json", json.dumps(manifest, indent=2))
 
         def _cleanup():
@@ -192,6 +196,7 @@ async def select_and_cut(
             zip_path,
             media_type="application/zip",
             filename=f"{recording_id}-clips.zip",
+            headers={"X-Clip-Summary": json.dumps(summary)},
             background=BackgroundTask(_cleanup),
         )
     except HTTPException:
@@ -204,6 +209,8 @@ async def select_and_cut(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
         source_path.unlink(missing_ok=True)
+        if wav_path is not None:
+            wav_path.unlink(missing_ok=True)
 
 
 @app.post("/render-script")

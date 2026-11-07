@@ -1,42 +1,88 @@
 #!/usr/bin/env python3
 """
-Björn Rō — cuts a segment out of a source video with ffmpeg.
+Björn Rō — cuts a clip out of a source video, frame- and sample-accurately.
 
-Tries stream-copy first (fast, no quality loss). Falls back to re-encoding
-only if the copy fails, which can happen when the requested start time
-doesn't land cleanly on a video keyframe for this container/codec -- audio
-doesn't have that constraint (AAC/MP3 frames are a few tens of ms, so a cut
-point is always "close enough"), so the fallback still copies audio
-untouched and only re-encodes video, at a high enough quality (CRF 17) to
-be visually indistinguishable from the source.
+Always re-encodes. Stream copy (the previous approach) can only start a
+video on a keyframe, so ffmpeg silently pulled every clip's start back to
+the previous keyframe -- measured 0.4-3.7s early on a real recording, which
+is exactly the "hear the previous note fading first" problem. Re-encoding
+at high quality is visually and audibly transparent (and the final Reel is
+re-encoded by the renderer and Instagram anyway): x264 CRF 18 for 8-bit
+sources, x265 Main10 CRF 20 for 10-bit sources so a 10-bit/HDR grade isn't
+flattened to 8-bit; ffmpeg carries the source's colour tags through. Audio
+is AAC 320k with a 10ms fade-in (prevents a click) and a per-clip fade-out
+chosen by clean_points.py.
 """
 from __future__ import annotations
 
+import re
 import subprocess
+import tempfile
 from pathlib import Path
 
+import numpy as np
+import soundfile as sf
 import imageio_ffmpeg
+from scipy.signal import correlate
+
+FADE_IN_SEC = 0.01
+MAX_CUT_ERROR_SEC = 0.03
 
 
-def cut_clip(source_path: Path, start: float, end: float, out_path: Path) -> None:
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+def video_encoder_args(source_path: Path) -> list[str]:
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    probe = subprocess.run([ffmpeg, "-hide_banner", "-i", str(source_path)], capture_output=True, text=True).stderr
+    video = next((line for line in probe.splitlines() if "Video:" in line), "")
+    if not re.search(r"p1[02](le|be)", video):
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"]
+    encoders = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+    if "libx265" in encoders:
+        return ["-c:v", "libx265", "-preset", "superfast", "-crf", "20", "-pix_fmt", "yuv420p10le",
+                "-tag:v", "hvc1", "-x265-params", "log-level=error"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p10le"]
+
+
+def cut_clip(source_path: Path, start: float, end: float, out_path: Path,
+             encoder_args: list[str], fade_out: float) -> None:
     duration = end - start
-
-    copy_cmd = [
-        ffmpeg_exe, "-y", "-ss", str(start), "-i", str(source_path),
-        "-t", str(duration), "-c", "copy", "-avoid_negative_ts", "make_zero",
-        str(out_path),
-    ]
-    result = subprocess.run(copy_cmd, capture_output=True, text=True)
-    if result.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
-        return
-
-    reencode_cmd = [
-        ffmpeg_exe, "-y", "-ss", str(start), "-i", str(source_path),
-        "-t", str(duration), "-c:v", "libx264", "-crf", "17", "-preset", "medium",
-        "-c:a", "copy", "-avoid_negative_ts", "make_zero",
-        str(out_path),
-    ]
-    result = subprocess.run(reencode_cmd, capture_output=True, text=True)
+    fade_out = min(fade_out, duration / 2)
+    audio_filter = (f"afade=t=in:st=0:d={FADE_IN_SEC},"
+                    f"afade=t=out:st={duration - fade_out:.3f}:d={fade_out:.3f}")
+    cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-ss", f"{start:.3f}", "-i", str(source_path),
+           "-t", f"{duration:.3f}", *encoder_args, "-af", audio_filter, "-c:a", "aac", "-b:a", "320k",
+           "-movflags", "+faststart", str(out_path)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg cut failed for {start}-{end}:\n{result.stderr[-2000:]}")
+
+
+def _decode_audio(path: Path, sr: int) -> np.ndarray:
+    wav = Path(tempfile.mkstemp(suffix=".wav")[1])
+    try:
+        subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-v", "error", "-i", str(path), "-vn",
+                        "-ac", "1", "-ar", str(sr), "-c:a", "pcm_s16le", str(wav)], check=True)
+        y, _ = sf.read(str(wav), dtype="float32")
+        return y
+    finally:
+        wav.unlink(missing_ok=True)
+
+
+def _offset(source: np.ndarray, sr: int, probe: np.ndarray, expected: float) -> float:
+    lo = max(0, int((expected - 1.0) * sr))
+    window = source[lo:int((expected + 1.0) * sr) + len(probe)]
+    corr = correlate(window, probe, mode="valid", method="fft")
+    return (lo + int(np.argmax(np.abs(corr)))) / sr - expected
+
+
+def verify_cut(source_audio: np.ndarray, sr: int, clip_path: Path, start: float, end: float) -> None:
+    """Confirms the finished file really starts and ends where the analysis
+    said, by locating its first and last seconds in the source audio."""
+    clip = _decode_audio(clip_path, sr)
+    duration = end - start
+    late = duration - 4.3
+    start_err = _offset(source_audio, sr, clip[int(0.1 * sr):int(2.1 * sr)], start + 0.1)
+    late_err = _offset(source_audio, sr, clip[int(late * sr):int((late + 4.0) * sr)], start + late)
+    length_err = len(clip) / sr - duration
+    if max(abs(start_err), abs(late_err)) > MAX_CUT_ERROR_SEC or abs(length_err) > 0.05:
+        raise RuntimeError(f"Cut {start}-{end} landed off target: start {start_err:+.3f}s, "
+                           f"near end {late_err:+.3f}s, length {length_err:+.3f}s")

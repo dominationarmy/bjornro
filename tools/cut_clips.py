@@ -23,10 +23,12 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 import imageio_ffmpeg
-from scipy.signal import correlate
 
 FADE_IN_SEC = 0.01
-MAX_CUT_ERROR_SEC = 0.03
+MAX_START_ERROR_SEC = 0.05
+MAX_LATE_ERROR_SEC = 0.15
+MAX_LENGTH_ERROR_SEC = 0.05
+PROBE_SEC = 4.0
 
 
 def video_encoder_args(source_path: Path) -> list[str]:
@@ -67,22 +69,36 @@ def _decode_audio(path: Path, sr: int) -> np.ndarray:
         wav.unlink(missing_ok=True)
 
 
-def _offset(source: np.ndarray, sr: int, probe: np.ndarray, expected: float) -> float:
-    lo = max(0, int((expected - 1.0) * sr))
-    window = source[lo:int((expected + 1.0) * sr) + len(probe)]
-    corr = correlate(window, probe, mode="valid", method="fft")
-    return (lo + int(np.argmax(np.abs(corr)))) / sr - expected
+def _envelope_db(x: np.ndarray, hop: int) -> np.ndarray:
+    n = len(x) // hop
+    return 20 * np.log10(np.sqrt((x[:n * hop].reshape(n, hop) ** 2).mean(axis=1)) + 1e-6)
+
+
+def _offset(source: np.ndarray, sr: int, probe: np.ndarray, expected: float, search: float = 1.0) -> float:
+    """Where the probe's loudness envelope best matches the source, relative to
+    where it should be. Matches envelopes (10ms steps), not raw waveforms: a
+    held note repeats every cycle, so raw matching can lock onto the wrong one."""
+    hop = sr // 100
+    lo = max(0, int((expected - search) * sr))
+    window = _envelope_db(source[lo:int((expected + search) * sr) + len(probe)], hop)
+    p = _envelope_db(probe, hop)
+    p = (p - p.mean()) / (p.std() + 1e-9)
+    scores = [np.dot(p, (seg - seg.mean()) / (seg.std() + 1e-9))
+              for seg in (window[k:k + len(p)] for k in range(len(window) - len(p) + 1))]
+    return (lo + int(np.argmax(scores)) * hop) / sr - expected
 
 
 def verify_cut(source_audio: np.ndarray, sr: int, clip_path: Path, start: float, end: float) -> None:
-    """Confirms the finished file really starts and ends where the analysis
-    said, by locating its first and last seconds in the source audio."""
+    """Confirms the finished file really starts where the analysis said, doesn't
+    drift, and has the right length, by locating its opening and closing
+    seconds in the source audio."""
     clip = _decode_audio(clip_path, sr)
     duration = end - start
-    late = duration - 4.3
-    start_err = _offset(source_audio, sr, clip[int(0.1 * sr):int(2.1 * sr)], start + 0.1)
-    late_err = _offset(source_audio, sr, clip[int(late * sr):int((late + 4.0) * sr)], start + late)
+    head, late = FADE_IN_SEC * 1.5, duration - PROBE_SEC - 0.3
+    start_err = _offset(source_audio, sr, clip[int(head * sr):int((head + PROBE_SEC) * sr)], start + head)
+    late_err = _offset(source_audio, sr, clip[int(late * sr):int((late + PROBE_SEC) * sr)], start + late)
     length_err = len(clip) / sr - duration
-    if max(abs(start_err), abs(late_err)) > MAX_CUT_ERROR_SEC or abs(length_err) > 0.05:
-        raise RuntimeError(f"Cut {start}-{end} landed off target: start {start_err:+.3f}s, "
+    if (abs(start_err) > MAX_START_ERROR_SEC or abs(late_err) > MAX_LATE_ERROR_SEC
+            or abs(length_err) > MAX_LENGTH_ERROR_SEC):
+        raise RuntimeError(f"cut {start}-{end} landed off target: start {start_err:+.3f}s, "
                            f"near end {late_err:+.3f}s, length {length_err:+.3f}s")

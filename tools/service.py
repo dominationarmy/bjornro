@@ -164,14 +164,20 @@ async def select_and_cut(
         )
         encoder_args = video_encoder_args(source_path)
 
-        clips = []
-        for i, seg in enumerate(segments, start=1):
-            filename = f"{recording_id}-{i:02d}.mp4"
+        clips, rejected = [], []
+        for seg in segments:
             out_path = Path(tempfile.mkstemp(suffix=".mp4")[1])
             cut_paths.append(out_path)
             cut_clip(source_path, seg["start"], seg["end"], out_path, encoder_args, seg["fade_out"])
-            verify_cut(audio, sr, out_path, seg["start"], seg["end"])
+            try:
+                verify_cut(audio, sr, out_path, seg["start"], seg["end"])
+            except RuntimeError as exc:
+                rejected.append(str(exc))
+                continue
+            filename = f"{recording_id}-{len(clips) + 1:02d}.mp4"
             clips.append({"filename": filename, "path": out_path, **seg})
+        if segments and not clips:
+            raise RuntimeError(f"All {len(segments)} cuts failed verification, e.g. {rejected[0]}")
 
         summary = {
             "recording_id": recording_id,
@@ -179,6 +185,8 @@ async def select_and_cut(
             "clean_starts_found": len(points["starts"]),
             "clean_ends_found": len(points["ends"]),
             "segments_found": len(segments),
+            "clips_delivered": len(clips),
+            "rejected_cuts": rejected,
         }
         zip_path = Path(tempfile.mkstemp(suffix=".zip")[1])
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
